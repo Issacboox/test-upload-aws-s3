@@ -1,26 +1,26 @@
 package main
 
 import (
-	"context"
-	"io/ioutil"
 	"log"
 	"os"
-	"strings"
 
 	s3 "bam/aws"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/minio/minio-go/v7"
+	"github.com/joho/godotenv"
 )
 
 func main() {
-
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
 	// Set up S3 client
 	endpoint := os.Getenv("ENDPOINT") // Use the endpoint specific to your region
-	accessKeyID := os.Getenv("ACCESS_KEY_ID") 
+	accessKeyID := os.Getenv("ACCESS_KEY_ID")
 	secretAccessKey := os.Getenv("SECRET_ACCESS_KEY")
 	useSSL := true
-	bucketName := os.Getenv("BUCKER_NAME")
+	bucketName := os.Getenv("BUCKET_NAME")
 
 	// Create S3 client instance
 	s3Client, err := s3.NewS3Client(endpoint, accessKeyID, secretAccessKey, bucketName, useSSL)
@@ -59,44 +59,27 @@ func main() {
 			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 		}
 
-		return c.JSON(uploadResponse)
+		// สร้าง JSON response ที่มีเฉพาะ Token
+		tokenResponse := struct {
+			Token string `json:"token"`
+		}{
+			Token: uploadResponse.Token,
+		}
+
+		return c.JSON(tokenResponse)
 	})
 
-	// API เพื่อรับรหัสไฟล์และเปิดไฟล์
-	app.Get("/view-file", func(c *fiber.Ctx) error {
-		// รับลิ้งค์จาก query string
-		link := c.Query("link")
+	app.Get("/download/:filename/:token", func(c *fiber.Ctx) error {
+		fileName := c.Params("filename")
+		token := c.Params("token")
 
-		// ตรวจสอบว่าลิ้งค์มีรูปแบบที่ถูกต้องหรือไม่
-		// ตัวอย่างเช่น ต้องเริ่มต้นด้วย https://monastic-be.s3.amazonaws.com/
-		if !strings.HasPrefix(link, "https://monastic-be.s3.amazonaws.com/") {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid file link"})
-		}
-
-		// แยกชื่อไฟล์ออกจากลิ้งค์
-		objectName := link[len("https://monastic-be.s3.amazonaws.com/"):]
-
-		// ดึงข้อมูลไฟล์จาก MinIO
-		response, err := s3Client.Client.GetObject(context.Background(), bucketName, objectName, minio.GetObjectOptions{})
+		downloadResponse, err := s3Client.GenerateDownloadURLWithFileNameAndToken(fileName, token)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-		}
-		defer response.Close()
-
-		// ตรวจสอบประเภทของเนื้อหา (Content-Type)
-		_, err = response.Stat()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+			// Handle error (e.g., return an error response to the user)
+			return c.Status(downloadResponse.Status).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		// อ่านข้อมูลไฟล์
-		content, err := ioutil.ReadAll(response)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-		}
-
-		// ส่งข้อมูลไฟล์กลับไปยังผู้ใช้
-		return c.SendString(string(content))
+		return c.JSON(downloadResponse)
 	})
 
 	// Start the Fiber app
