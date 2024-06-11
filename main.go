@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 
 	s3 "bam/aws"
@@ -82,6 +83,34 @@ func main() {
 		return c.JSON(downloadResponse)
 	})
 
+	app.Delete("/delete/:filename/:token", func(c *fiber.Ctx) error {
+		fileName := c.Params("filename")
+		token := c.Params("token")
+
+		// ดึง Secret Token จาก Environment Variable
+		secretToken := os.Getenv("SECRET_TOKEN")
+		if secretToken == "" {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "missing SECRET_TOKEN"})
+		}
+
+		// สร้าง Token ใหม่เพื่อตรวจสอบ
+		expectedToken, err := s3.GenerateToken(secretToken, fileName) // Use s3.GenerateToken here
+		if err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		// ตรวจสอบ Token
+		if token != expectedToken {
+			return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
+		}
+
+		err = s3Client.DeleteFile(fileName) // Use = for assignment
+		if err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		return c.SendStatus(http.StatusOK) // ส่ง status 200 OK กลับไปหากลบไฟล์สำเร็จ
+	})
 	// Start the Fiber app
 	log.Fatal(app.Listen(":3000"))
 }

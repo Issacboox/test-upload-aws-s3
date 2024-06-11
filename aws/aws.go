@@ -172,7 +172,7 @@ func (s *S3Client) UploadFileFromStream(file *multipart.FileHeader, contentType 
 	return ReqLinkResponse{
 		Status:   http.StatusOK,
 		Token:    token,
-		FileName: newFileName, 
+		FileName: newFileName,
 		URL:      presignedURL.String(),
 	}, nil
 }
@@ -214,4 +214,21 @@ func generateFileID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+func (s *S3Client) DeleteFile(fileName string) error {
+	// 1. ลบไฟล์จาก S3 bucket
+	err := s.Client.RemoveObject(context.Background(), s.BucketName, fileName, minio.RemoveObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to delete file from S3: %w", err)
+	}
+
+	// 2. ลบ Token ที่เกี่ยวข้องออกจาก tokenMap
+	for token, fileInfo := range s.tokenMap {
+		if fileInfo.FileName == fileName {
+			delete(s.tokenMap, token)
+			break // หยุด loop เมื่อเจอ Token ที่ตรงกัน
+		}
+	}
+
+	return nil
 }
