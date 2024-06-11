@@ -124,57 +124,62 @@ func GenerateToken(secretToken, fileName string) (string, error) {
 	return token, nil
 }
 
-func (s *S3Client) UploadFileFromStream(file *multipart.FileHeader, contentType string) (ReqLinkResponse, error) {
-	fileID, err := generateFileID()
-	if err != nil {
-		return ReqLinkResponse{Status: http.StatusInternalServerError}, err
-	}
-
-	newFileName := fileID + "-" + uuid.New().String()
-	info, err := file.Open()
-	if err != nil {
-		return ReqLinkResponse{Status: http.StatusInternalServerError}, err
-	}
-	defer info.Close()
-
-	size := file.Size
-	_, err = s.Client.PutObject(context.Background(), s.BucketName, newFileName, info, size, minio.PutObjectOptions{ContentType: contentType})
-	if err != nil {
-		return ReqLinkResponse{Status: http.StatusInternalServerError}, err
-	}
-
-	// สร้าง Token และบันทึกข้อมูลไฟล์ลงฐานข้อมูล
+func (s *S3Client) UploadMultipleFilesFromStream(files []*multipart.FileHeader, contentType string) ([]ReqLinkResponse, error) {
+	responses := make([]ReqLinkResponse, 0, len(files)) // Preallocate slice for efficiency
 	secretToken := os.Getenv("SECRET_TOKEN")
+
 	if secretToken == "" {
-		return ReqLinkResponse{Status: http.StatusInternalServerError}, errors.New("missing SECRET_TOKEN")
+		return nil, errors.New("missing SECRET_TOKEN")
 	}
 
-	// สร้าง Token โดยใช้ Secret Token และชื่อไฟล์
-	token, err := GenerateToken(secretToken, newFileName)
-	if err != nil {
-		return ReqLinkResponse{Status: http.StatusInternalServerError}, err
+	for _, file := range files {
+		fileID, err := generateFileID()
+		if err != nil {
+			return nil, err // Return error immediately if file ID generation fails
+		}
+
+		newFileName := fileID + "-" + uuid.New().String()
+		info, err := file.Open()
+		if err != nil {
+			return nil, err // Return error immediately if file opening fails
+		}
+		defer info.Close()
+
+		size := file.Size
+		_, err = s.Client.PutObject(context.Background(), s.BucketName, newFileName, info, size, minio.PutObjectOptions{ContentType: contentType})
+		if err != nil {
+			return nil, err // Return error immediately if upload fails
+		}
+
+		// สร้าง Token โดยใช้ Secret Token และชื่อไฟล์
+		token, err := GenerateToken(secretToken, newFileName)
+		if err != nil {
+			return nil, err
+		}
+
+		// สร้าง Presigned URL
+		expirationTime := time.Hour
+		presignedURL, err := s.Client.PresignedGetObject(context.Background(), s.BucketName, newFileName, expirationTime, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// เก็บ Token และข้อมูลไฟล์ (ในหน่วยความจำ, หรือคุณสามารถปรับให้บันทึกลงฐานข้อมูลได้)
+		fileInfo := FileInfo{
+			FileName:  newFileName,
+			ExpiredAt: time.Now().Add(time.Hour * 24 * 7),
+		}
+		s.tokenMap[token] = fileInfo
+
+		responses = append(responses, ReqLinkResponse{
+			Status:   http.StatusOK,
+			Token:    token,
+			FileName: newFileName,
+			URL:      presignedURL.String(),
+		})
 	}
 
-	// สร้าง Presigned URL (ไม่ต้องบันทึกลงฐานข้อมูลในขั้นนี้)
-	expirationTime := time.Hour
-	presignedURL, err := s.Client.PresignedGetObject(context.Background(), s.BucketName, newFileName, expirationTime, nil)
-	if err != nil {
-		return ReqLinkResponse{Status: http.StatusInternalServerError}, err
-	}
-
-	// เก็บ Token และข้อมูลไฟล์ (ในหน่วยความจำ, หรือคุณสามารถปรับให้บันทึกลงฐานข้อมูลได้)
-	fileInfo := FileInfo{
-		FileName:  newFileName,
-		ExpiredAt: time.Now().Add(time.Hour * 24 * 7),
-	}
-	s.tokenMap[token] = fileInfo
-
-	return ReqLinkResponse{
-		Status:   http.StatusOK,
-		Token:    token,
-		FileName: newFileName,
-		URL:      presignedURL.String(),
-	}, nil
+	return responses, nil
 }
 
 func (s *S3Client) GenerateDownloadURLWithFileNameAndToken(fileName, token string) (GenerateURLResponse, error) {
@@ -215,11 +220,18 @@ func generateFileID() (string, error) {
 	}
 	return hex.EncodeToString(bytes), nil
 }
-func (s *S3Client) DeleteFile(fileName string) error {
+
+func (s *S3Client) DeleteFile(fileName string) (int, error) {
 	// 1. ลบไฟล์จาก S3 bucket
 	err := s.Client.RemoveObject(context.Background(), s.BucketName, fileName, minio.RemoveObjectOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to delete file from S3: %w", err)
+		// ตรวจสอบ Error เฉพาะของ MinIO
+		if minioErr, ok := err.(minio.ErrorResponse); ok {
+			if minioErr.Code == "NoSuchKey" { // ไฟล์ไม่พบ
+				return http.StatusNotFound, fmt.Errorf("file not found: %w", err)
+			}
+		}
+		return http.StatusInternalServerError, fmt.Errorf("failed to delete file from S3: %w", err)
 	}
 
 	// 2. ลบ Token ที่เกี่ยวข้องออกจาก tokenMap
@@ -230,5 +242,5 @@ func (s *S3Client) DeleteFile(fileName string) error {
 		}
 	}
 
-	return nil
+	return http.StatusOK, nil // ส่งกลับ status 200 OK หากลบไฟล์สำเร็จ
 }

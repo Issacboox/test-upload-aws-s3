@@ -50,24 +50,22 @@ func main() {
 
 	// Upload file function
 	app.Post("/upload", func(c *fiber.Ctx) error {
-		file, err := c.FormFile("file")
+		form, err := c.MultipartForm()
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).SendString(err.Error())
+			return c.Status(fiber.StatusBadRequest).SendString("Error parsing multipart form")
 		}
 
-		uploadResponse, err := s3Client.UploadFileFromStream(file, file.Header.Get("Content-Type"))
+		files := form.File["file"] // Assuming the file input field is named "file"
+		if len(files) == 0 {
+			return c.Status(fiber.StatusBadRequest).SendString("No files uploaded")
+		}
+
+		uploadResponses, err := s3Client.UploadMultipleFilesFromStream(files, files[0].Header.Get("Content-Type"))
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 		}
 
-		// สร้าง JSON response ที่มีเฉพาะ Token
-		tokenResponse := struct {
-			Token string `json:"token"`
-		}{
-			Token: uploadResponse.Token,
-		}
-
-		return c.JSON(tokenResponse)
+		return c.JSON(uploadResponses) // Return a JSON array of responses
 	})
 
 	app.Get("/download/:filename/:token", func(c *fiber.Ctx) error {
@@ -104,12 +102,16 @@ func main() {
 			return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
 		}
 
-		err = s3Client.DeleteFile(fileName) // Use = for assignment
+		// err = s3Client.DeleteFile(fileName) // Use = for assignment
+		// if err != nil {
+		// 	return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		// }
+		status, err := s3Client.DeleteFile(fileName) // รับค่า status ออกมาด้วย
 		if err != nil {
-			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return c.Status(status).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		return c.SendStatus(http.StatusOK) // ส่ง status 200 OK กลับไปหากลบไฟล์สำเร็จ
+		return c.SendStatus(status) // ส่ง status กลับไป
 	})
 	// Start the Fiber app
 	log.Fatal(app.Listen(":3000"))
